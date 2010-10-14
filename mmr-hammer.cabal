@@ -1,0 +1,17 @@
+Name:                mmr-hammer
+Version:             0.1
+Synopsis:            Multimaster replication management tools.
+License:             GPL
+License-file:        LICENSE
+Author:              Edward Z. Yang
+Maintainer:          ezyang@mit.edu
+Category:            Development
+Build-type:          Simple
+Cabal-version:       >=1.2
+
+Executable mmr-hammer
+    Main-is: mmr-hammer.hs
+    Build-depends:
+        LDAP >= 0.6.6 && < 0.7,
+        containers == 0.3.*,
+        base == 4.*
