@@ -1,0 +1,15 @@
+MMR Hammer
+
+It is a truth universally acknowledged that multimaster replication
+is a pain in the ass.  I mean, there's even a really sketchy Perl
+script for setting up replication agreements that doesn't even do
+it properly.  And when things break... hoo boy.
+
+This is a script for Fedora DS 389; it might work for LDAP
+implementations but is not tested.  Right now, it lets you print
+your pristine replication agreements and bindings and temporarily
+suspend them.  Useful if your server is getting wedged due to
+replication.  Eventually it will support MMR initialization.  Oh,
+and it's written in Haskell.
+
+Multimaster replication not working for you?  It's HAMMERTIME.
