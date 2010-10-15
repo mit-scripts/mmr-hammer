@@ -1,14 +1,25 @@
-{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE ViewPatterns, CPP, ScopedTypeVariables #-}
+
+import Prelude hiding (catch)
 
 import qualified Data.Set as S
 import Data.Char
+import Data.Maybe
+import Data.List
+import Data.IORef
 
 import Control.Monad
+import Control.Exception
 
 import System.IO
+import System.IO.Unsafe
+import System.Exit
 import System.Environment
+import System.Console.GetOpt
+import System.Directory
+import System.FilePath
 
-import LDAP.Init (ldapInit, ldapSimpleBind)
+import LDAP.Init (ldapInitialize, ldapSimpleBind)
 import LDAP.Constants (ldapPort)
 import LDAP.Search (SearchAttributes(LDAPAllUserAttrs), LDAPEntry(..),
     LDAPScope(LdapScopeSubtree), ldapSearch)
@@ -129,19 +140,124 @@ restoreBinds ldap statefile = do
     binds <- fmap read (readFile statefile)
     ldapModify ldap replicaBase [LDAPMod LdapModAdd "nsDS5ReplicaBindDN" binds]
 
-createLdap = do
-    -- XXX change this into some legit configuration
-    let server = "localhost"
-    password <- readFile "/etc/signup-ldap-pw"
-    ldap <- ldapInit server ldapPort
-    ldapSimpleBind ldap "cn=Directory Manager" password
+createLdap uri user password = do
+    ldap <- ldapInitialize uri
+    -- XXX LDAP has no support for other bind methods (yet)
+    ldapSimpleBind ldap user password
     return ldap
+
+data Password = Password String | AskPassword | NoPassword
+
+data Options = Options {
+      optUri      :: Maybe String
+    , optPassword :: Password
+    , optUser     :: Maybe String
+    , optDebug    :: Bool
+}
+
+defaultOptions = Options {
+      optUri        = Nothing
+    , optPassword   = NoPassword
+    , optUser       = Nothing
+    , optDebug      = False
+}
+
+putOptHost h r = r { optUri = Just ("ldap://" ++ h) }
+putOptPassword p r = r {
+    optPassword = case p of
+        Just p  -> Password p
+        Nothing -> AskPassword
+    }
+
+#define PUT(field) (\x r -> r {field = x})
+#define PUTX(field, x) (\r -> r {field = x})
+#define PUTJ(field) (\x r -> r {field = Just x})
+options =
+    [ Option []    ["uri"]      (ReqArg PUTJ(optUri) "URI")      "URI of LDAP server"
+    , Option ['h'] ["host"]     (ReqArg putOptHost "HOST")       "host, connect with ldap schema"
+    , Option ['p'] ["password"] (OptArg putOptPassword "PASS")   "password"
+    , Option ['u'] ["user"]     (ReqArg PUTJ(optUser) "USER")    "dn of user to bind as"
+    , Option ['d'] ["debug"]    (NoArg  PUTX(optDebug, True))    "debugging output"
+    ]
+
+parseOptions = do
+    argv <- getArgs
+    case getOpt Permute options argv of
+        (optlist, args@(_:_), []) ->
+            return (foldl (flip ($)) defaultOptions optlist, args)
+        (_,_,errs) -> do
+            hPutStr stderr (concat errs ++ usageInfo header options)
+            exitFailure
+    where header = "Usage: mmr-hammer [print|suspend|restore] [binds|agreements]\n"
+
+fillWith opts mUri mUser mPassword= do
+    uri <- case optUri opts of
+        Just uri -> return uri
+        Nothing -> mUri
+    user <- case optUser opts of
+        Just user -> return user
+        Nothing -> mUser
+    password <- case optPassword opts of
+        Password p -> return p
+        AskPassword -> askPassword
+        NoPassword -> mPassword
+    return (uri, user, password)
+
+defaultStrategy opts = do
+    debugIO "Trying defaultStrategy"
+    fillWith opts (error "Missing host") (error "Missing user") (error "Missing password")
+ldapVircStrategy opts = do
+    debugIO "Trying ldapVircStrategy"
+    -- Only supports "default" profile for now
+    home <- getHomeDirectory
+    contents <- lines `fmap` readFile (home </> ".ldapvirc")
+    let parseLdapVirc = do
+        let section = takeWhile (not . isPrefixOf "profile") . tail
+                    . dropWhile (/= "profile default") $ contents
+            getField name = let prefix = name ++ " "
+                            in evaluate . fromJust . stripPrefix prefix . fromJust . find (isPrefixOf prefix) $ section
+        fillWith opts (getField "host") (getField "user") (getField "password")
+    bracketOnError (return ())
+                   (const (warnIO "Failed to parse .ldapvirc"))
+                   (const parseLdapVirc)
+fallbackStrategy opts = do
+    debugIO "Using fallbackStrategy"
+    let mUri = do
+            warnIO "Defaulting to ldap://localhost (try --uri or --host)"
+            return "ldap://localhost"
+        mUser = do
+            warnIO "Defaulting to cn=Directory Manager (try --user)"
+            return "cn=Directory Manager"
+        mPassword = do
+            warnIO "Defaulting to empty password (try --password)"
+            return "" -- XXX semantics not quite right
+    fillWith opts mUri mUser mPassword
+
+askPassword = bracket (hSetEcho stdin False)
+                      (const $ hSetEcho stdin True >> hPutStr stderr "\n")
+                      (const $ hPutStr stderr "Password: " >>
+                               hFlush stderr >>
+                               hGetLine stdin)
+
+tryAll [] = error "tryAll: empty list, please supply fallback"
+tryAll [x] = x
+tryAll (x:xs) = catch x (\(e :: SomeException) -> debugIO ("tryAll: Failed with " ++ show e) >> tryAll xs)
+
+isDebugging = unsafePerformIO (newIORef False)
+{-# NOINLINE isDebugging #-}
+
+debugIO msg = do
+    b <- readIORef isDebugging
+    when b (hPutStrLn stderr $ "DEBUG: " ++ msg)
+warnIO msg = hPutStrLn stderr $ "WARNING: " ++ msg
 
 main = do
     let replicasFile = "mmr-hammer-replica"
         bindsFile    = "mmr-hammer-binds"
-    args <- getArgs
-    ldap <- createLdap
+    (opts, args) <- parseOptions
+    when (optDebug opts) (writeIORef isDebugging True)
+    (uri, user, password) <- tryAll $ [defaultStrategy, ldapVircStrategy, fallbackStrategy] `ap` [opts]
+    ldap <- createLdap uri user password
     case args of
         ["print",   "binds"] -> printBinds ldap
         ["suspend", "binds"] -> suspendBinds ldap bindsFile

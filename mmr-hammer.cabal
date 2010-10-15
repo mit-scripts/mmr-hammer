@@ -14,4 +14,6 @@ Executable mmr-hammer
     Build-depends:
         LDAP >= 0.6.6 && < 0.7,
         containers == 0.3.*,
+        directory == 1.0.*,
+        filepath == 1.1.*,
         base == 4.*
