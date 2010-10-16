@@ -16,4 +16,7 @@ Executable mmr-hammer
         containers == 0.3.*,
         directory == 1.0.*,
         filepath == 1.1.*,
+        time == 1.2.*,
+        network == 2.*,
+        old-locale == 1.0.*,
         base == 4.*
