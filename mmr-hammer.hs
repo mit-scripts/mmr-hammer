@@ -19,10 +19,12 @@ import System.Console.GetOpt
 import System.Directory
 import System.FilePath
 
+import Text.Printf
+
 import LDAP.Init (ldapInitialize, ldapSimpleBind)
 import LDAP.Constants (ldapPort)
 import LDAP.Search (SearchAttributes(LDAPAllUserAttrs), LDAPEntry(..),
-    LDAPScope(LdapScopeSubtree), ldapSearch)
+    LDAPScope(..), ldapSearch)
 import LDAP.Modify (LDAPModOp(..), LDAPMod(..), ldapAdd, ldapDelete,
     ldapModify, list2ldm)
 
@@ -33,14 +35,19 @@ replicaBase = "cn=replica,cn=\"dc=scripts,dc=mit,dc=edu\",cn=mapping tree,cn=con
 searchScripts = search scriptsBase
 searchConfig  = search configBase
 searchReplica = search replicaBase
-search base ldap query = ldapSearch ldap (Just base) LdapScopeSubtree (Just query) LDAPAllUserAttrs False
+getEntry ldap dn = debugIOVal ("getEntry: " ++ dn) $
+    listToMaybe `fmap` ldapSearch ldap (Just dn) LdapScopeBase Nothing LDAPAllUserAttrs False
+search base ldap query = debugIOVal ("search: " ++ query ++ " -b " ++ base) $
+    ldapSearch ldap (Just base) LdapScopeSubtree (Just query) LDAPAllUserAttrs False
 
 normalizeKey    = map toLower
-lookupKey (normalizeKey -> key) attrs = lookup key (map (\(normalizeKey -> k,v)->(k,v)) attrs)
+lookupKey (normalizeKey -> key) attrs = maybe [] id $ lookup key (map (\(normalizeKey -> k,v)->(k,v)) attrs)
+lookupKey1 key = listToMaybe . lookupKey key
 constructKeySet = S.fromList . map normalizeKey
 
 -- mungeAgreements should live in some error monad; right now using IO
-getAgreements ldap = mapM mungeAgreement =<< searchReplica ldap "objectClass=nsDS5ReplicationAgreement"
+getAgreements ldap = mapM mungeAgreement =<< getRawAgreements ldap
+getRawAgreements ldap = searchReplica ldap "objectClass=nsDS5ReplicationAgreement"
 mungeAgreement (LDAPEntry dn attrs) = do
     attrs' <- filterM replicaConfigPredicate attrs
     return (LDAPEntry dn attrs')
@@ -49,17 +56,26 @@ replicaConfigPredicate (normalizeKey -> name, _)
     | S.member name replicaRuntime = return False
     | otherwise = error ("replicaConfigPredicate: Unrecognized replica key " ++ name)
 
-getReplica ldap = do
-    r <- searchReplica ldap "objectClass=nsDS5Replica"
+getConfig ldap = do
+    r <- getEntry ldap configBase
     case r of
-        [] -> error "getReplica: No replica object found"
-        [x] -> return x
-        otherwise -> error "getReplica: Too many replica objects found"
+        Nothing -> error "getConfig: No config object found"
+        Just x -> return x
+getVersion ldap = do
+    (LDAPEntry _ attrs) <- getConfig ldap
+    case lookupKey1 "nsslapd-versionstring" attrs of
+        Nothing -> error "getVersion: No version field in config found"
+        Just x -> return x
+getReplica ldap = do
+    r <- getEntry ldap replicaBase
+    case r of
+        Nothing -> error "getReplica: No replica object found"
+        Just x -> return x
 getBinds ldap = do
     (LDAPEntry _ attrs) <- getReplica ldap
     case lookupKey "nsDS5ReplicaBindDN" attrs of
-        Nothing -> error "getBinds: No binds found"
-        Just bs -> return bs
+        [] -> error "getBinds: No binds found"
+        bs -> return bs
 
 -- what goes in when you create a replication agreement
 replicaConfig = constructKeySet
@@ -145,6 +161,19 @@ createLdap uri user password = do
     -- XXX LDAP has no support for other bind methods (yet)
     ldapSimpleBind ldap user password
     return ldap
+
+printStatus ldap = do
+    rawAgreements <- getRawAgreements ldap
+    let width = maximum (0:concatMap (map length . lookupKey "nsDS5ReplicaHost" . leattrs) rawAgreements)
+    forM_ rawAgreements $ \(LDAPEntry dn attrs) -> do
+        let mhost   = lookupKey1 "nsDS5ReplicaHost" attrs
+            mstatus = lookupKey1 "nsds5replicaLastUpdateStatus" attrs
+        case (mhost, mstatus) of
+            (Just host, Just status) ->
+                printf ("%-" ++ show width ++ "s : %s\n") host status
+            otherwise -> warnIO ("Malformed replication agreement at " ++ dn)
+
+printVersion ldap = getVersion ldap >>= putStrLn
 
 data Password = Password String | AskPassword | NoPassword
 
@@ -249,6 +278,9 @@ isDebugging = unsafePerformIO (newIORef False)
 debugIO msg = do
     b <- readIORef isDebugging
     when b (hPutStrLn stderr $ "DEBUG: " ++ msg)
+debugIOVal msg m = do
+    debugIO msg
+    m
 warnIO msg = hPutStrLn stderr $ "WARNING: " ++ msg
 
 main = do
@@ -265,5 +297,7 @@ main = do
         ["print",   "agreements"] -> printAgreements ldap
         ["suspend", "agreements"] -> suspendAgreements ldap replicasFile
         ["restore", "agreements"] -> restoreAgreements ldap replicasFile
+        ["status"] -> printStatus ldap
+        ["version"] -> printVersion ldap
         [] -> putStrLn "mmr-hammer.hs [print|suspend|restore] [binds|agreements]"
         _ -> error "Unknown argument"
