@@ -10,6 +10,7 @@ import Data.IORef
 
 import Control.Monad
 import Control.Exception
+import Control.Concurrent
 
 import System.IO
 import System.IO.Unsafe
@@ -173,6 +174,38 @@ printStatus ldap = do
                 printf ("%-" ++ show width ++ "s : %s\n") host status
             otherwise -> warnIO ("Malformed replication agreement at " ++ dn)
 
+getTarget ldap target = do
+    dnMatch <- getEntry ldap target
+    case dnMatch of
+        (Just entry) -> return entry
+        Nothing -> do
+            r <- searchReplica ldap $ "(&(objectClass=nsDS5ReplicationAgreement)(nsDS5ReplicaHost=" ++ target ++ "))"
+            case r of
+                []  -> error "getTarget: target not found"
+                [x] -> return x
+                (length -> l) -> error $ printf "getTarget: target is ambiguous, found %d results" l
+
+update ldap target = do
+    (LDAPEntry dn attrs) <- getTarget ldap target
+    -- check and make sure full updates are not broken
+    let bindMethod = lookupKey1 "nsDS5ReplicaBindMethod" attrs
+    version <- getVersion ldap
+    case (bindMethod, version) of
+        (Just "SASL/GSSAPI", version)
+            | "389-Directory/1.2.6" == version ||
+              isPrefixOf "389-Directory/1.2.6." version ->
+                 error $ "update: GSSAPI full updates from 1.2.6 are broken,\n" ++
+                 "        see https://bugzilla.redhat.com/show_bug.cgi?id=637852"
+        _ -> return ()
+    ldapModify ldap dn [LDAPMod LdapModAdd "nsDS5BeginReplicaRefresh" ["start"]]
+    --updateMonitor
+
+updateMonitor ldap target = do
+    -- 5 second interval
+    threadDelay 5000000
+    (LDAPEntry _ attrs) <- getTarget ldap target
+    -- XXX Find the status and report it, or exit
+    updateMonitor ldap target
 printVersion ldap = getVersion ldap >>= putStrLn
 
 data Password = Password String | AskPassword | NoPassword
@@ -297,7 +330,8 @@ main = do
         ["print",   "agreements"] -> printAgreements ldap
         ["suspend", "agreements"] -> suspendAgreements ldap replicasFile
         ["restore", "agreements"] -> restoreAgreements ldap replicasFile
-        ["status"] -> printStatus ldap
+        ["status"]  -> printStatus ldap
         ["version"] -> printVersion ldap
+        ["update", target] -> update ldap target
         [] -> putStrLn "mmr-hammer.hs [print|suspend|restore] [binds|agreements]"
         _ -> error "Unknown argument"
