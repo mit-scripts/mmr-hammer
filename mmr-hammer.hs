@@ -47,18 +47,18 @@ mungeAgreement (LDAPEntry dn attrs) = do
 replicaConfigPredicate (normalizeKey -> name, _)
     | S.member name replicaConfig  = return True
     | S.member name replicaRuntime = return False
-    | otherwise = error ("Unrecognized replica key " ++ name)
+    | otherwise = error ("replicaConfigPredicate: Unrecognized replica key " ++ name)
 
 getReplica ldap = do
     r <- searchReplica ldap "objectClass=nsDS5Replica"
     case r of
-        [] -> error "No replica object found"
+        [] -> error "getReplica: No replica object found"
         [x] -> return x
-        otherwise -> error "Too many replica objects found"
+        otherwise -> error "getReplica: Too many replica objects found"
 getBinds ldap = do
     (LDAPEntry _ attrs) <- getReplica ldap
     case lookupKey "nsDS5ReplicaBindDN" attrs of
-        Nothing -> error "No binds found"
+        Nothing -> error "getBinds: No binds found"
         Just bs -> return bs
 
 -- what goes in when you create a replication agreement
@@ -106,7 +106,7 @@ printAgreements ldap = do
 suspendAgreements ldap statefile = do
     replicas <- getAgreements ldap
     when (null replicas) $
-        error "Refusing to write empty replicas file"
+        error "suspendAgreements: Refusing to write empty replicas file"
     withFile statefile WriteMode $ \h ->
         hPutStr h (serializeEntries replicas)
     withFile (statefile ++ ".ldif") WriteMode $ \h ->
@@ -131,7 +131,7 @@ printBinds ldap = do
 suspendBinds ldap statefile = do
     binds <- getBinds ldap
     when (null binds) $
-        error "Refusing to write empty binds file"
+        error "suspendBinds: Refusing to write empty binds file"
     withFile statefile WriteMode $ \h ->
         hPutStr h (show binds)
     ldapModify ldap replicaBase [LDAPMod LdapModDelete "nsDS5ReplicaBindDN" []]
