@@ -11,6 +11,7 @@ Cabal-version:       >=1.2
 
 Executable mmr-hammer
     Main-is: mmr-hammer.hs
+    Ghc-options: -Wall -fno-warn-missing-signatures
     Build-depends:
         LDAP >= 0.6.6 && < 0.7,
         containers == 0.3.*,

@@ -27,11 +27,10 @@ import Text.Printf
 import Network.URI
 
 import LDAP.Init (ldapInitialize, ldapSimpleBind)
-import LDAP.Constants (ldapPort)
 import LDAP.Search (SearchAttributes(LDAPAllUserAttrs), LDAPEntry(..),
     LDAPScope(..), ldapSearch)
 import LDAP.Modify (LDAPModOp(..), LDAPMod(..), ldapAdd, ldapDelete,
-    ldapModify, list2ldm, pairs2ldm)
+    ldapModify, list2ldm)
 
 scriptsBase = "dc=scripts,dc=mit,dc=edu"
 configBase  = "cn=config"
@@ -40,8 +39,8 @@ replicaBase = "cn=replica,cn=\"dc=scripts,dc=mit,dc=edu\",cn=mapping tree,cn=con
 searchScripts = search scriptsBase
 searchConfig  = search configBase
 searchReplica = search replicaBase
-search base ldap query = debugIOVal ("search: " ++ query ++ " -b " ++ base) $
-    ldapSearch ldap (Just base) LdapScopeSubtree (Just query) LDAPAllUserAttrs False
+search base ldap querystr = debugIOVal ("search: " ++ querystr ++ " -b " ++ base) $
+    ldapSearch ldap (Just base) LdapScopeSubtree (Just querystr) LDAPAllUserAttrs False
 
 getEntry ldap dn = debugIOVal ("getEntry: " ++ dn) $
     listToMaybe `fmap` ldapSearch ldap (Just dn) LdapScopeBase Nothing LDAPAllUserAttrs False
@@ -202,13 +201,13 @@ printStatus ldap = forEachRawAgreement ldap f >> printConflicts ldap
                 (Just host) -> do
                     let status = maybe "no status found" id mstatus
                     printf ("%-" ++ show width ++ "s : %s\n") host status
-                otherwise -> warnIO ("Malformed replication agreement at " ++ dn)
+                _ -> warnIO ("Malformed replication agreement at " ++ dn)
             case minitstatus of
                 (Just initstatus) -> putStrLn $ take width (repeat ' ') ++ " > " ++ initstatus
-                otherwise -> return ()
+                _ -> return ()
 
 printRUV ldap = forEachRawAgreement ldap f
-    where f width (LDAPEntry dn attrs) = do
+    where f _ (LDAPEntry dn attrs) = do
             let mhost = lookupKey1 "nsDS5ReplicaHost" attrs
                 ruvs = lookupKey "nsDS50ruv" attrs
             putStrLn (maybe dn id mhost)
@@ -219,7 +218,7 @@ cleanRUV ldap = do
 
 printConflicts ldap = do
     conflicts <- getConflicts ldap
-    forM_ conflicts $ \(LDAPEntry dn attrs) ->
+    forM_ conflicts $ \(LDAPEntry dn _) ->
         putStrLn dn
 
 getTarget ldap target = do
@@ -238,8 +237,8 @@ update ldap target = do
     -- check and make sure full updates are not broken
     let bindMethod = lookupKey1 "nsDS5ReplicaBindMethod" attrs
     version <- getVersion ldap
-    case (bindMethod, version) of
-        (Just "SASL/GSSAPI", version)
+    case bindMethod of
+        (Just "SASL/GSSAPI")
             | "389-Directory/1.2.6" == version ||
               isPrefixOf "389-Directory/1.2.6." version ->
                  error $ "update: GSSAPI full updates from 1.2.6 are broken,\n" ++
@@ -293,7 +292,7 @@ resetTestReplication ldap = do
     old <- getEntry ldap testDn
     when (isJust old) $ ldapDelete ldap testDn
     conflicts <- getConflicts ldap
-    forM_ conflicts $ \(LDAPEntry dn attrs) -> do
+    forM_ conflicts $ \(LDAPEntry dn _) -> do
         let orig = tail (dropWhile (/= '+') dn)
         when (normalizeKey orig == normalizeKey testDn) $
             ldapDelete ldap dn
@@ -329,11 +328,7 @@ defaultOptions = Options {
 }
 
 putOptHost h r = r { optUri = Just ("ldap://" ++ h) }
-putOptPassword p r = r {
-    optPassword = case p of
-        Just p  -> Password p
-        Nothing -> AskPassword
-    }
+putOptPassword p r = r { optPassword = maybe AskPassword Password p }
 
 #define PUT(field) (\x r -> r {field = x})
 #define PUTX(field, x) (\r -> r {field = x})
