@@ -152,6 +152,10 @@ restoreAgreements ldap statefile = do
     replicas <- fmap unserializeEntries (readFile statefile)
     mapM_ (ldapAddEntry ldap) replicas
 
+removeRedundantReplication ldap = do
+    master <- getLocalhost ldap
+    ldapDelete ldap (agreementDn (agreementCn master))
+
 reinitAgreements ldap statefile = do
     putStrLn "Disabling replication"
     disableReplication ldap
@@ -167,16 +171,22 @@ initAgreements ldap targets = do
     master <- getLocalhost ldap
     forM_ targets $ \target -> do
         host <- canonicalize target
-        initAgreement ldap master host `catchLDAP` \e ->
-            if code e == LdapAlreadyExists
-                then putStrLn ("Agreement already exists for " ++ canonical host)
-                else throwLDAP e
+        if canonical host /= master
+            then do
+                initAgreement ldap master host `catchLDAP` \e ->
+                    if code e == LdapAlreadyExists
+                        then putStrLn ("Agreement already exists for " ++ canonical host)
+                        else throwLDAP e
+            else putStrLn ("Cowardly refusing to replicate with self")
+
+agreementCn target = "GSSAPI Replication to " ++ target
+
+agreementDn cn = "cn=\"" ++ cn ++ "\"," ++ replicaBase
 
 initAgreement ldap master (Canonical target) = do
     putStrLn ("Initializing agreement to " ++ target)
-    let cn = "GSSAPI Replication to " ++ target
-    let agreementDn = "cn=\"" ++ cn ++ "\"," ++ replicaBase
-    ldapAdd ldap agreementDn $ list2ldm LdapModAdd
+    let cn = agreementCn target
+    ldapAdd ldap (agreementDn cn) $ list2ldm LdapModAdd
         [ ("objectClass", ["top", "nsDS5ReplicationAgreement"])
         , ("cn", [cn])
         , ("nsDS5ReplicaHost", [target])
@@ -500,6 +510,7 @@ main = do
         ["recover", "user", uid] -> recoverUser ldap uid
         ["cleanruv", target, replicaid] -> cleanRUV ldap target replicaid
         ["conflicts"] -> printConflicts ldap
+        ["rrr"] -> removeRedundantReplication ldap
         ("init": "agreements": targets) -> initAgreements ldap targets
         ("suspend": _) -> usage "suspend [agreements|binds]"
         ("set":     _) -> usage "set [binds] VALUES..."
