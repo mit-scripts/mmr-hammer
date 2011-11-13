@@ -36,64 +36,21 @@ import LDAP.Modify (LDAPModOp(..), LDAPMod(..), ldapAdd, ldapDelete,
 import LDAP.Data (LDAPReturnCode(..))
 import LDAP.Exceptions (LDAPException(..), catchLDAP, throwLDAP)
 
+-------------------------------------------------------------------------------
+-- Type safety
+
 newtype Canonical = Canonical { canonical :: HostName }
 canonicalize h = Canonical . map toLower . hostName <$> getHostByName h
+
+-------------------------------------------------------------------------------
+-- Metadata
 
 scriptsBase = "dc=scripts,dc=mit,dc=edu"
 configBase  = "cn=config"
 replicaBase = "cn=replica,cn=\"dc=scripts,dc=mit,dc=edu\",cn=mapping tree,cn=config"
-
-searchScripts = search scriptsBase
-searchConfig  = search configBase
-searchReplica = search replicaBase
-search base ldap querystr = debugIOVal ("search: " ++ querystr ++ " -b " ++ base) $
-    ldapSearch ldap (Just base) LdapScopeSubtree (Just querystr) LDAPAllUserAttrs False
-
-getEntry ldap dn = debugIOVal ("getEntry: " ++ dn) $
-    listToMaybe `fmap` ldapSearch ldap (Just dn) LdapScopeBase Nothing LDAPAllUserAttrs False
-
-normalizeKey    = map toLower
-lookupKey (normalizeKey -> key) attrs = maybe [] id $ lookup key (map (\(normalizeKey -> k,v)->(k,v)) attrs)
-lookupKey1 key = listToMaybe . lookupKey key
-constructKeySet = S.fromList . map normalizeKey
-
--- mungeAgreements should live in some error monad; right now using IO
-getAgreements ldap = mapM mungeAgreement =<< getRawAgreements ldap
-getRawAgreements ldap = searchReplica ldap "objectClass=nsDS5ReplicationAgreement"
-mungeAgreement (LDAPEntry dn attrs) = do
-    attrs' <- filterM replicaConfigPredicate attrs
-    return (LDAPEntry dn attrs')
-replicaConfigPredicate (normalizeKey -> name, _)
-    | S.member name replicaConfig  = return True
-    | S.member name replicaRuntime = return False
-    | otherwise = error ("replicaConfigPredicate: Unrecognized replica key " ++ name)
-
-getConfig ldap = do
-    r <- getEntry ldap configBase
-    case r of
-        Nothing -> error "getConfig: No config object found"
-        Just x -> return x
-getVersion ldap = do
-    (LDAPEntry _ attrs) <- getConfig ldap
-    case lookupKey1 "nsslapd-versionstring" attrs of
-        Nothing -> error "getVersion: No version field in config found"
-        Just x -> return x
-getReplica ldap = do
-    r <- getEntry ldap replicaBase
-    case r of
-        Nothing -> error "getReplica: No replica object found"
-        Just x -> return x
-getBinds ldap = do
-    (LDAPEntry _ attrs) <- getReplica ldap
-    case lookupKey "nsDS5ReplicaBindDN" attrs of
-        [] -> error "getBinds: No binds found"
-        bs -> return bs
-getConflicts ldap = searchScripts ldap "nsds5ReplConflict=*"
-getLocalhost ldap = do
-    (LDAPEntry _ attrs) <- getConfig ldap
-    case lookupKey1 "nsslapd-localhost" attrs of
-        Nothing -> error "getLocalhost: No localhost name in config found"
-        Just x -> return x
+agreementCn target = "GSSAPI Replication to " ++ target
+agreementDn cn = "cn=\"" ++ cn ++ "\"," ++ replicaBase
+testDn = "scriptsVhostName=replication-test,ou=VirtualHosts," ++ scriptsBase
 
 -- what goes in when you create a replication agreement
 replicaConfig = constructKeySet
@@ -128,11 +85,91 @@ replicaRuntime = constructKeySet
     , "nsds5beginreplicarefresh"
     ]
 
+-------------------------------------------------------------------------------
+-- Utility functions
+
+searchScripts = search scriptsBase
+searchConfig  = search configBase
+searchReplica = search replicaBase
+search base ldap querystr = debugIOVal ("search: " ++ querystr ++ " -b " ++ base) $
+    ldapSearch ldap (Just base) LdapScopeSubtree (Just querystr) LDAPAllUserAttrs False
+
+getEntry ldap dn = debugIOVal ("getEntry: " ++ dn) $
+    listToMaybe `fmap` ldapSearch ldap (Just dn) LdapScopeBase Nothing LDAPAllUserAttrs False
+
+normalizeKey    = map toLower
+lookupKey (normalizeKey -> key) attrs = maybe [] id $ lookup key (map (\(normalizeKey -> k,v)->(k,v)) attrs)
+lookupKey1 key = listToMaybe . lookupKey key
+constructKeySet = S.fromList . map normalizeKey
+
 ldapAddEntry ldap (LDAPEntry dn attrs) =
     ldapAdd ldap dn (list2ldm LdapModAdd attrs)
-
 ldapDeleteEntry ldap (LDAPEntry dn _ ) =
     ldapDelete ldap dn
+
+createLdap uri user password = do
+    debugIO $ "createLdap: Connecting to " ++ uri
+    ldap <- ldapInitialize uri
+    -- XXX LDAP has no support for other bind methods (yet)
+    ldapSimpleBind ldap user password
+    return ldap
+
+-------------------------------------------------------------------------------
+-- Data representation
+
+serializeEntries = show . map (\(LDAPEntry dn attrs) -> (dn, attrs))
+unserializeEntries = map (\(dn, attrs) -> LDAPEntry dn attrs) . read
+
+entriesToLdif = unlines . map entryToLdif
+entryToLdif (LDAPEntry dn attrs) = "add " ++ dn ++ "\n" ++ concatMap renderAttr attrs
+    where renderAttr (k, vs) = concatMap (\v -> k ++ ": " ++ v ++ "\n") vs
+
+-------------------------------------------------------------------------------
+-- Managing replication agreements
+
+-- mungeAgreements should live in some error monad; right now using IO
+getAgreements ldap = mapM mungeAgreement =<< getRawAgreements ldap
+getRawAgreements ldap = searchReplica ldap "objectClass=nsDS5ReplicationAgreement"
+mungeAgreement (LDAPEntry dn attrs) = do
+    attrs' <- filterM replicaConfigPredicate attrs
+    return (LDAPEntry dn attrs')
+replicaConfigPredicate (normalizeKey -> name, _)
+    | S.member name replicaConfig  = return True
+    | S.member name replicaRuntime = return False
+    | otherwise = error ("replicaConfigPredicate: Unrecognized replica key " ++ name)
+
+-------------------------------------------------------------------------------
+-- Queries
+
+getConfig ldap = do
+    r <- getEntry ldap configBase
+    case r of
+        Nothing -> error "getConfig: No config object found"
+        Just x -> return x
+getVersion ldap = do
+    (LDAPEntry _ attrs) <- getConfig ldap
+    case lookupKey1 "nsslapd-versionstring" attrs of
+        Nothing -> error "getVersion: No version field in config found"
+        Just x -> return x
+getReplica ldap = do
+    r <- getEntry ldap replicaBase
+    case r of
+        Nothing -> error "getReplica: No replica object found"
+        Just x -> return x
+getBinds ldap = do
+    (LDAPEntry _ attrs) <- getReplica ldap
+    case lookupKey "nsDS5ReplicaBindDN" attrs of
+        [] -> error "getBinds: No binds found"
+        bs -> return bs
+getConflicts ldap = searchScripts ldap "nsds5ReplConflict=*"
+getLocalhost ldap = do
+    (LDAPEntry _ attrs) <- getConfig ldap
+    case lookupKey1 "nsslapd-localhost" attrs of
+        Nothing -> error "getLocalhost: No localhost name in config found"
+        Just x -> return x
+
+-------------------------------------------------------------------------------
+-- Commands
 
 printAgreements ldap = do
     replicas <- getAgreements ldap
@@ -152,6 +189,8 @@ restoreAgreements ldap statefile = do
     replicas <- fmap unserializeEntries (readFile statefile)
     mapM_ (ldapAddEntry ldap) replicas
 
+-- Hack; you should probably find agreements using something similar to
+-- forEachRawAgreement
 removeRedundantReplication ldap = do
     master <- getLocalhost ldap
     ldapDelete ldap (agreementDn (agreementCn master))
@@ -179,10 +218,6 @@ initAgreements ldap targets = do
                         else throwLDAP e
             else putStrLn ("Cowardly refusing to replicate with self")
 
-agreementCn target = "GSSAPI Replication to " ++ target
-
-agreementDn cn = "cn=\"" ++ cn ++ "\"," ++ replicaBase
-
 initAgreement ldap master (Canonical target) = do
     putStrLn ("Initializing agreement to " ++ target)
     let cn = agreementCn target
@@ -198,13 +233,6 @@ initAgreement ldap master (Canonical target) = do
         , ("nsDS5ReplicaUpdateSchedule", ["0000-2359 0123456"])
         , ("nsDS5ReplicaTimeout", ["120"])
         ]
-
-serializeEntries = show . map (\(LDAPEntry dn attrs) -> (dn, attrs))
-unserializeEntries = map (\(dn, attrs) -> LDAPEntry dn attrs) . read
-
-entriesToLdif = unlines . map entryToLdif
-entryToLdif (LDAPEntry dn attrs) = "add " ++ dn ++ "\n" ++ concatMap renderAttr attrs
-    where renderAttr (k, vs) = concatMap (\v -> k ++ ": " ++ v ++ "\n") vs
 
 printBinds ldap = do
     binds <- getBinds ldap
@@ -227,13 +255,6 @@ setBinds ldap binds = do
     when (null oldBinds) $
         error "setBinds: Cowardly refusing to overwrite non-empty binds on server"
     ldapModify ldap replicaBase [LDAPMod LdapModAdd "nsDS5ReplicaBindDN" binds]
-
-createLdap uri user password = do
-    debugIO $ "createLdap: Connecting to " ++ uri
-    ldap <- ldapInitialize uri
-    -- XXX LDAP has no support for other bind methods (yet)
-    ldapSimpleBind ldap user password
-    return ldap
 
 forEachRawAgreement ldap f = do
     rawAgreements <- getRawAgreements ldap
@@ -307,8 +328,7 @@ updateMonitor ldap target = do
     updateMonitor ldap target
 printVersion ldap = getVersion ldap >>= putStrLn
 
-testDn = "scriptsVhostName=replication-test,ou=VirtualHosts," ++ scriptsBase
-
+-- XXX not concurrent
 testReplication ldap = do
     resetTestReplication ldap
     time <- formatTime defaultTimeLocale "%a-%b-%e-%H%M%S" `fmap` getCurrentTime
@@ -362,6 +382,9 @@ recoverUser ldap uid = do
         [ ("objectClass", ["top", "account"])
         , ("uid", [uid])
         ]) `catch` (\(e :: SomeException) -> print e)
+
+-------------------------------------------------------------------------------
+-- Option parsing
 
 data Password = Password String | AskPassword | NoPassword
 
@@ -463,6 +486,9 @@ tryAll [] = error "tryAll: empty list, please supply fallback"
 tryAll [x] = x
 tryAll (x:xs) = catch x (\(e :: SomeException) -> debugIO ("tryAll: Failed with " ++ show e) >> tryAll xs)
 
+-------------------------------------------------------------------------------
+-- Debugging
+
 isDebugging = unsafePerformIO (newIORef False)
 {-# NOINLINE isDebugging #-}
 
@@ -475,6 +501,9 @@ debugIOVal msg m = do
 warnIO msg = hPutStrLn stderr $ "WARNING: " ++ msg
 
 usage v = putStrLn ("Usage: mmr-hammer " ++ v)
+
+-------------------------------------------------------------------------------
+-- Command dispatch
 
 main = do
     (opts, args) <- parseOptions
