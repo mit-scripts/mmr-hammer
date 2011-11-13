@@ -12,6 +12,7 @@ import Data.Time
 import Control.Monad
 import Control.Exception
 import Control.Concurrent
+import Control.Applicative
 
 import System.IO
 import System.IO.Unsafe
@@ -25,12 +26,18 @@ import System.Locale
 import Text.Printf
 
 import Network.URI
+import Network.BSD
 
 import LDAP.Init (ldapInitialize, ldapSimpleBind)
 import LDAP.Search (SearchAttributes(LDAPAllUserAttrs), LDAPEntry(..),
     LDAPScope(..), ldapSearch)
 import LDAP.Modify (LDAPModOp(..), LDAPMod(..), ldapAdd, ldapDelete,
     ldapModify, list2ldm)
+import LDAP.Data (LDAPReturnCode(..))
+import LDAP.Exceptions (LDAPException(..), catchLDAP, throwLDAP)
+
+newtype Canonical = Canonical { canonical :: HostName }
+canonicalize h = Canonical . map toLower . hostName <$> getHostByName h
 
 scriptsBase = "dc=scripts,dc=mit,dc=edu"
 configBase  = "cn=config"
@@ -82,6 +89,11 @@ getBinds ldap = do
         [] -> error "getBinds: No binds found"
         bs -> return bs
 getConflicts ldap = searchScripts ldap "nsds5ReplConflict=*"
+getLocalhost ldap = do
+    (LDAPEntry _ attrs) <- getConfig ldap
+    case lookupKey1 "nsslapd-localhost" attrs of
+        Nothing -> error "getLocalhost: No localhost name in config found"
+        Just x -> return x
 
 -- what goes in when you create a replication agreement
 replicaConfig = constructKeySet
@@ -150,6 +162,32 @@ reinitAgreements ldap statefile = do
     putStrLn "Enabling replication"
     enableReplication ldap
     putStrLn "Done!"
+
+initAgreements ldap targets = do
+    master <- getLocalhost ldap
+    forM_ targets $ \target -> do
+        host <- canonicalize target
+        initAgreement ldap master host `catchLDAP` \e ->
+            if code e == LdapAlreadyExists
+                then putStrLn ("Agreement already exists for " ++ canonical host)
+                else throwLDAP e
+
+initAgreement ldap master (Canonical target) = do
+    putStrLn ("Initializing agreement to " ++ target)
+    let cn = "GSSAPI Replication to " ++ target
+    let agreementDn = "cn=\"" ++ cn ++ "\"," ++ replicaBase
+    ldapAdd ldap agreementDn $ list2ldm LdapModAdd
+        [ ("objectClass", ["top", "nsDS5ReplicationAgreement"])
+        , ("cn", [cn])
+        , ("nsDS5ReplicaHost", [target])
+        , ("nsDS5ReplicaRoot", ["dc=scripts,dc=mit,dc=edu"])
+        , ("nsDS5ReplicaPort", ["389"])
+        , ("nsDS5ReplicaTransportInfo", ["LDAP"])
+        , ("nsDS5ReplicaBindDN", ["uid=ldap/"++master++",ou=People,dc=scripts,dc=mit,dc=edu"])
+        , ("nsDS5ReplicaBindMethod", ["SASL/GSSAPI"])
+        , ("nsDS5ReplicaUpdateSchedule", ["0000-2359 0123456"])
+        , ("nsDS5ReplicaTimeout", ["120"])
+        ]
 
 serializeEntries = show . map (\(LDAPEntry dn attrs) -> (dn, attrs))
 unserializeEntries = map (\(dn, attrs) -> LDAPEntry dn attrs) . read
@@ -462,9 +500,11 @@ main = do
         ["recover", "user", uid] -> recoverUser ldap uid
         ["cleanruv", target, replicaid] -> cleanRUV ldap target replicaid
         ["conflicts"] -> printConflicts ldap
+        ("init": "agreements": targets) -> initAgreements ldap targets
         ("suspend": _) -> usage "suspend [agreements|binds]"
         ("set":     _) -> usage "set [binds] VALUES..."
         ("restore": _) -> usage "restore [agreements|binds]"
+        ("init":    _) -> usage "init [agreements]"
         ("reinit":  _) -> usage "reinit [agreements]"
         ("disable": _) -> usage "disable [replication|syntaxcheck]"
         ("enable":  _) -> usage "enable [replication|syntaxcheck]"
