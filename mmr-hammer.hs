@@ -177,7 +177,7 @@ restoreBinds ldap statefile = do
 setBinds ldap binds = do
     oldBinds <- getBinds ldap
     when (null oldBinds) $
-        error "restoreBinds: Cowardly refusing to overwrite non-empty binds on server"
+        error "setBinds: Cowardly refusing to overwrite non-empty binds on server"
     ldapModify ldap replicaBase [LDAPMod LdapModAdd "nsDS5ReplicaBindDN" binds]
 
 createLdap uri user password = do
@@ -237,6 +237,7 @@ update ldap target = do
     -- check and make sure full updates are not broken
     let bindMethod = lookupKey1 "nsDS5ReplicaBindMethod" attrs
     version <- getVersion ldap
+    {-
     case bindMethod of
         (Just "SASL/GSSAPI")
             | "389-Directory/1.2.6" == version ||
@@ -244,6 +245,7 @@ update ldap target = do
                  error $ "update: GSSAPI full updates from 1.2.6 are broken,\n" ++
                  "        see https://bugzilla.redhat.com/show_bug.cgi?id=637852"
         _ -> return ()
+    -}
     ldapModify ldap dn [LDAPMod LdapModAdd "nsDS5BeginReplicaRefresh" ["start"]]
     threadDelay 1000000
     printStatus ldap
@@ -294,7 +296,9 @@ resetTestReplication ldap = do
     conflicts <- getConflicts ldap
     forM_ conflicts $ \(LDAPEntry dn _) -> do
         let orig = tail (dropWhile (/= '+') dn)
-        when (normalizeKey orig == normalizeKey testDn) $
+        when (normalizeKey orig == normalizeKey testDn) $ do
+            -- Work around deadlock in multimaster replication
+            ldapModify ldap dn [LDAPMod LdapModDelete "nsds5replconflict" []]
             ldapDelete ldap dn
 
 recoverUser ldap uid = do
