@@ -47,7 +47,8 @@ canonicalize h = Canonical . map toLower . hostName <$> getHostByName h
 
 scriptsBase = "dc=scripts,dc=mit,dc=edu"
 configBase  = "cn=config"
-replicaBase = "cn=replica,cn=\"dc=scripts,dc=mit,dc=edu\",cn=mapping tree,cn=config"
+mappingBase = "cn=\"dc=scripts,dc=mit,dc=edu\",cn=mapping tree,cn=config"
+replicaBase = "cn=replica," ++ mappingBase
 agreementCn target = "GSSAPI Replication to " ++ target
 agreementDn cn = "cn=\"" ++ cn ++ "\"," ++ replicaBase
 testDn = "scriptsVhostName=replication-test,ou=VirtualHosts," ++ scriptsBase
@@ -141,6 +142,7 @@ replicaConfigPredicate (normalizeKey -> name, _)
 -------------------------------------------------------------------------------
 -- Queries
 
+-- XXX refactor me
 getConfig ldap = do
     r <- getEntry ldap configBase
     case r of
@@ -156,10 +158,20 @@ getReplica ldap = do
     case r of
         Nothing -> error "getReplica: No replica object found"
         Just x -> return x
+getMapping ldap = do
+    r <- getEntry ldap mappingBase
+    case r of
+        Nothing -> error "getMapping: No mapping object found"
+        Just x -> return x
 getBinds ldap = do
     (LDAPEntry _ attrs) <- getReplica ldap
     case lookupKey "nsDS5ReplicaBindDN" attrs of
         [] -> error "getBinds: No binds found"
+        bs -> return bs
+getReferrals ldap = do
+    (LDAPEntry _ attrs) <- getMapping ldap
+    case lookupKey "nsslapd-referral" attrs of
+        [] -> error "getReferrals: No referrals found"
         bs -> return bs
 getConflicts ldap = searchScripts ldap "nsds5ReplConflict=*"
 getLocalhost ldap = do
@@ -250,11 +262,27 @@ restoreBinds ldap statefile = do
     binds <- fmap read (readFile statefile)
     setBinds ldap binds
 
+-- XXX these need syntax checking
 setBinds ldap binds = do
     oldBinds <- getBinds ldap
     when (null oldBinds) $
         error "setBinds: Cowardly refusing to overwrite non-empty binds on server"
     ldapModify ldap replicaBase [LDAPMod LdapModAdd "nsDS5ReplicaBindDN" binds]
+
+-- XXX ditto
+addBinds ldap binds = do
+    old_binds <- getBinds ldap
+    let binds' = nub (old_binds ++ binds)
+    when (length binds' == length old_binds) $
+        error "addBinds: Cowardly refusing to perform a no-op (binds already present)"
+    ldapModify ldap replicaBase [LDAPMod LdapModReplace "nsDS5ReplicaBindDN" binds']
+
+addReferrals ldap referrals = do
+    old_referrals <- getReferrals ldap
+    let referrals' = nub (old_referrals ++ referrals)
+    when (length referrals' == length old_referrals) $
+        error "addReferrals: Cowardly refusing to perform a no-op (referrals already present)"
+    ldapModify ldap mappingBase [LDAPMod LdapModReplace "nsslapd-referral" referrals']
 
 forEachRawAgreement ldap f = do
     rawAgreements <- getRawAgreements ldap
@@ -525,6 +553,10 @@ main = do
         ["restore", "binds"] -> restoreBinds ldap bindsFile
         ["set", "binds"] -> usage "set binds uid=ldap/example.com,ou=People,dn=example,dn=com ..."
         ("set": "binds": binds) -> setBinds ldap binds
+        ["add", "binds"] -> usage "add binds uid=ldap/example.com,ou=People,dn=example,dn=com ..."
+        ("add": "binds": binds) -> addBinds ldap binds
+        -- ["add", "referrals"] -> usage "add referrals ldap://example.com:389/dc%3Dscripts%2Cdc%3Dmit%2Cdc%3Dedu ..."
+        -- ("add": "referrals": referrals) -> addReferrals ldap referrals
         ["reinit", "agreements"] -> reinitAgreements ldap replicasFile
         ["disable", "replication"] -> disableReplication ldap
         ["disable", "syntaxcheck"] -> disableSyntaxCheck ldap
@@ -543,6 +575,7 @@ main = do
         ("init": "agreements": targets) -> initAgreements ldap targets
         ("suspend": _) -> usage "suspend [agreements|binds]"
         ("set":     _) -> usage "set [binds] VALUES..."
+        ("add":     _) -> usage "add [binds] VALUES..."
         ("restore": _) -> usage "restore [agreements|binds]"
         ("init":    _) -> usage "init [agreements]"
         ("reinit":  _) -> usage "reinit [agreements]"
