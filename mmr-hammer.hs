@@ -230,6 +230,14 @@ initAgreements ldap targets = do
                         else throwLDAP e
             else putStrLn ("Cowardly refusing to replicate with self")
 
+deleteAgreements ldap targets = do
+    forM_ targets $ \target -> do
+        host <- canonicalize target
+        deleteAgreement ldap host `catchLDAP` \e ->
+            if code e == LdapNoSuchObject
+                then putStrLn ("No agreement for " ++ canonical host)
+                else throwLDAP e
+
 initAgreement ldap master (Canonical target) = do
     putStrLn ("Initializing agreement to " ++ target)
     let cn = agreementCn target
@@ -245,6 +253,11 @@ initAgreement ldap master (Canonical target) = do
         , ("nsDS5ReplicaUpdateSchedule", ["0000-2359 0123456"])
         , ("nsDS5ReplicaTimeout", ["120"])
         ]
+
+deleteAgreement ldap (Canonical target) = do
+    putStrLn ("Removing agreement to " ++ target)
+    let cn = agreementCn target
+    ldapDelete ldap (agreementDn (agreementCn target))
 
 printBinds ldap = do
     binds <- getBinds ldap
@@ -573,12 +586,14 @@ main = do
         ["conflicts"] -> printConflicts ldap
         ["rrr"] -> removeRedundantReplication ldap
         ("init": "agreements": targets) -> initAgreements ldap targets
+        ("delete": "agreements": targets) -> deleteAgreements ldap targets
         ("suspend": _) -> usage "suspend [agreements|binds]"
         ("set":     _) -> usage "set [binds] VALUES..."
         ("add":     _) -> usage "add [binds] VALUES..."
         ("restore": _) -> usage "restore [agreements|binds]"
         ("init":    _) -> usage "init [agreements]"
         ("reinit":  _) -> usage "reinit [agreements]"
+        ("delete":  _) -> usage "delete [agreements]"
         ("disable": _) -> usage "disable [replication|syntaxcheck]"
         ("enable":  _) -> usage "enable [replication|syntaxcheck]"
         ("reset":   _) -> usage "reset [test]"
