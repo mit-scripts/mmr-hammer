@@ -1,0 +1,5 @@
+resolver: lts-2.22
+packages:
+- .
+extra-deps:
+- LDAP-0.6.11
